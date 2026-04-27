@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>MiniServer - 首页</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, "Microsoft YaHei", sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: #333;
+        }
+        .container {
+            background: white;
+            border-radius: 16px;
+            padding: 48px;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+            text-align: center;
+            max-width: 600px;
+        }
+        h1 { color: #667eea; font-size: 36px; margin-bottom: 16px; }
+        .badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 14px;
+            margin-bottom: 24px;
+        }
+        .features {
+            text-align: left;
+            background: #f8f9fa;
+            border-radius: 12px;
+            padding: 20px;
+            margin: 20px 0;
+        }
+        .features li {
+            padding: 8px 0;
+            border-bottom: 1px solid #eee;
+            list-style: none;
+        }
+        .features li:last-child { border-bottom: none; }
+        .features li::before {
+            content: "✓ ";
+            color: #667eea;
+            font-weight: bold;
+        }
+        a {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 12px 32px;
+            background: #667eea;
+            color: white;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: bold;
+        }
+        a:hover { background: #5a6fd6; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <span class="badge">epoll + C++14</span>
+        <h1>MiniServer v2</h1>
+        <p>HTTP 静态文件服务器已成功运行</p>
+
+        <ul class="features">
+            <li>epoll ET 边缘触发 + 非阻塞 IO</li>
+            <li>正则 + 状态机解析 HTTP 请求</li>
+            <li>MIME 类型自动识别（HTML/CSS/JS/图片）</li>
+            <li>目录穿越攻击防护</li>
+            <li>404 / 400 标准错误页面</li>
+        </ul>
+
+        <a href="/test.html">访问测试页面 →</a>
+    </div>
+</body>
+</html>
