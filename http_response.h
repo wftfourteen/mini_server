@@ -34,8 +34,8 @@ private:
     // 生成 HTTP 状态码对应的状态行
     static std::string getStatusLine(int code);
 
-    // 读取文件内容（失败返回空串）
-    static std::string readFileContent(const std::string& filepath);
+    // 读取文件内容
+    static bool readFileContent(const std::string& filepath, std::string& content);
 
     // ---- 响应组件 ----
     int    statusCode_;

@@ -35,7 +35,15 @@ make
 ./server
 ```
 
-### 2. 测试
+### 2. 单元测试
+
+```bash
+make test
+```
+
+测试覆盖 HTTP 请求解析、Header 大小写、Keep-Alive、请求切包、半包等待、响应状态码和空文件响应。
+
+### 3. 手动测试
 
 ```bash
 # 访问首页
@@ -57,9 +65,50 @@ curl -v http://localhost:8080
 # 打开 http://localhost:8080
 ```
 
+### 4. 压力测试
+
+先启动服务器：
+
+```bash
+make
+./server
+```
+
+另开一个终端运行：
+
+```bash
+make stress
+```
+
+或者让脚本自动启动并清理本地服务器：
+
+```bash
+make stress-local
+```
+
+也可以手动调参数：
+
+```bash
+python3 scripts/stress_test.py --clients 128 --duration 30 --keepalive 8
+```
+
 ---
 
 ## 架构说明
+
+当前代码按职责拆分为：
+
+```
+server.cpp          # 程序入口
+http_server.*       # 监听 socket、epoll 主循环、连接调度
+epoller.*           # epoll add/mod/del/wait 封装
+connection.*        # 单连接读写缓冲、请求切包、连接状态
+thread_pool.*       # 固定线程池和任务队列
+http_request.*      # HTTP 请求解析
+http_response.*     # 静态文件响应构建
+tests/unit_tests.cpp
+scripts/stress_test.py
+```
 
 ### 请求处理流程
 

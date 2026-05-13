@@ -63,6 +63,8 @@ private:
     bool parseRequestLine(const std::string& line);
     bool parseHeader(const std::string& line);
     void parseBody(const std::string& data, size_t bodyStart);
+    static std::string normalizeHeaderKey(const std::string& key);
+    static std::string trim(const std::string& value);
 
     // ---- 状态 ----
     ParseState state_;

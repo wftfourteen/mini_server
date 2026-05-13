@@ -30,6 +30,9 @@
 *.exe
 *.out
 *.app
+server
+unit_tests
+test_empty.html
 
 # Visual Studio local workspace data
 .vs/

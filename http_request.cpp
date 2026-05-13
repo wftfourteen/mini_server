@@ -4,7 +4,10 @@
  */
 
 #include "http_request.h"
+#include <algorithm>
+#include <cctype>
 #include <iostream>
+#include <cstdlib>
 
 // 匹配 HTTP 请求行的正则表达式
 // 捕获组：(方法) (路径) (版本)
@@ -104,6 +107,7 @@ bool HttpRequest::parseRequestLine(const std::string& line) {
 
     // 捕获组3: HTTP 版本
     version_ = "HTTP/" + matches[3].str();
+    keepAlive_ = (version_ == "HTTP/1.1");
 
     std::cout << "[解析] 请求行: " << method_str << " " << path_
               << " " << version_ << std::endl;
@@ -114,20 +118,25 @@ bool HttpRequest::parseRequestLine(const std::string& line) {
 // 解析请求头：Key: Value
 // ============================================================
 bool HttpRequest::parseHeader(const std::string& line) {
-    size_t colon = line.find(": ");
+    size_t colon = line.find(':');
     if (colon == std::string::npos) {
         std::cerr << "[解析错误] 头部格式错误: " << line << std::endl;
         return false;
     }
 
-    std::string key   = line.substr(0, colon);
-    std::string value = line.substr(colon + 2);
+    std::string key = normalizeHeaderKey(trim(line.substr(0, colon)));
+    std::string value = trim(line.substr(colon + 1));
 
     headers_[key] = value;
 
     // 特殊处理 Connection 头
-    if (key == "Connection") {
-        keepAlive_ = (value == "keep-alive");
+    if (key == "connection") {
+        std::string loweredValue = normalizeHeaderKey(value);
+        if (loweredValue == "close") {
+            keepAlive_ = false;
+        } else if (loweredValue == "keep-alive") {
+            keepAlive_ = true;
+        }
     }
 
     return true;
@@ -147,8 +156,32 @@ void HttpRequest::parseBody(const std::string& data, size_t bodyStart) {
 // 获取头部值
 // ============================================================
 std::string HttpRequest::getHeader(const std::string& key) const {
-    auto it = headers_.find(key);
+    auto it = headers_.find(normalizeHeaderKey(key));
     return (it != headers_.end()) ? it->second : "";
+}
+
+std::string HttpRequest::normalizeHeaderKey(const std::string& key) {
+    std::string normalized = key;
+    std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return normalized;
+}
+
+std::string HttpRequest::trim(const std::string& value) {
+    size_t begin = 0;
+    while (begin < value.size() &&
+           std::isspace(static_cast<unsigned char>(value[begin]))) {
+        ++begin;
+    }
+
+    size_t end = value.size();
+    while (end > begin &&
+           std::isspace(static_cast<unsigned char>(value[end - 1]))) {
+        --end;
+    }
+
+    return value.substr(begin, end - begin);
 }
 
 // ============================================================

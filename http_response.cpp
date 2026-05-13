@@ -101,22 +101,28 @@ std::string HttpResponse::getStatusLine(int code) {
 // ============================================================
 // 读取文件内容
 // ============================================================
-std::string HttpResponse::readFileContent(const std::string& filepath) {
+bool HttpResponse::readFileContent(const std::string& filepath, std::string& content) {
     std::ifstream file(filepath, std::ios::binary);
     if (!file.is_open()) {
-        return "";
+        return false;
     }
 
     // 获取文件大小
     file.seekg(0, std::ios::end);
-    size_t size = file.tellg();
+    std::streampos end = file.tellg();
+    if (end < 0) {
+        return false;
+    }
+    size_t size = static_cast<size_t>(end);
     file.seekg(0, std::ios::beg);
 
     // 读取全部内容
-    std::string content(size, '\0');
-    file.read(&content[0], size);
+    content.assign(size, '\0');
+    if (size > 0) {
+        file.read(&content[0], static_cast<std::streamsize>(size));
+    }
 
-    return content;
+    return file.good() || file.eof();
 }
 
 // ============================================================
@@ -136,8 +142,8 @@ std::string HttpResponse::build(const std::string& path,
     else if (path == "/" || path.empty()) {
         statusCode_ = 200;
         contentType_ = "text/html; charset=utf-8";
-        body_ = readFileContent(htmlRoot + "/index.html");
-        if (body_.empty()) {
+        bool found = readFileContent(htmlRoot + "/index.html", body_);
+        if (!found) {
             // index.html 不存在，生成默认欢迎页
             statusCode_ = 200;
             body_ = "<html><body>"
@@ -150,9 +156,9 @@ std::string HttpResponse::build(const std::string& path,
     // ---- 3. 正常文件请求 ----
     else {
         std::string filepath = htmlRoot + path;
-        body_ = readFileContent(filepath);
+        bool found = readFileContent(filepath, body_);
 
-        if (body_.empty()) {
+        if (!found) {
             // 文件不存在 → 404
             statusCode_ = 404;
             contentType_ = "text/html; charset=utf-8";
