@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 import argparse
+import json
+import os
 import socket
 import statistics
 import threading
@@ -73,6 +75,7 @@ def main():
     parser.add_argument("--duration", type=int, default=10)
     parser.add_argument("--keepalive", type=int, default=4)
     parser.add_argument("--timeout", type=float, default=3.0)
+    parser.add_argument("--report")
     args = parser.parse_args()
 
     results = {}
@@ -100,6 +103,15 @@ def main():
     print(f"  failed: {total_failed}")
     print(f"  qps: {total_ok / elapsed:.2f}")
 
+    summary = {
+        "target": f"{args.host}:{args.port}{args.path}",
+        "clients": args.clients,
+        "duration_seconds": round(elapsed, 4),
+        "ok": total_ok,
+        "failed": total_failed,
+        "qps": round(total_ok / elapsed, 4),
+    }
+
     if latencies:
         latencies.sort()
         p50 = statistics.median(latencies)
@@ -108,6 +120,19 @@ def main():
         print(f"  latency p50: {p50:.2f} ms")
         print(f"  latency p95: {p95:.2f} ms")
         print(f"  latency p99: {p99:.2f} ms")
+        summary.update(
+            {
+                "latency_p50_ms": round(p50, 4),
+                "latency_p95_ms": round(p95, 4),
+                "latency_p99_ms": round(p99, 4),
+            }
+        )
+
+    if args.report:
+        os.makedirs(os.path.dirname(args.report) or ".", exist_ok=True)
+        with open(args.report, "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, ensure_ascii=True, indent=2)
+            handle.write("\n")
 
     return 0 if total_ok > 0 and total_failed == 0 else 1
 

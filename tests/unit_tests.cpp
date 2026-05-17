@@ -1,10 +1,15 @@
 #include "../connection.h"
 #include "../http_request.h"
 #include "../http_response.h"
+#include "../logger.h"
+#include "../timer_heap.h"
 
 #include <cassert>
+#include <chrono>
+#include <cstdio>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -115,6 +120,74 @@ void test_response_builds_200_404_403_and_empty_file() {
     assert(empty.find("Content-Length: 0\r\n") != std::string::npos);
 }
 
+void test_response_prepares_mapped_static_files() {
+    HttpResponse okResponse;
+    PreparedResponse ok = okResponse.prepare("/test.html", true, "webroot");
+    assert(ok.statusCode == 200);
+    assert(ok.file);
+    assert(ok.body.empty());
+    assert(ok.header.find("HTTP/1.1 200 OK\r\n") == 0);
+    assert(ok.header.find("Connection: keep-alive\r\n") != std::string::npos);
+    assert(ok.bodySize() == ok.file->size());
+
+    write_file("test_empty.html", "");
+    HttpResponse emptyResponse;
+    PreparedResponse empty = emptyResponse.prepare("/test_empty.html", false, ".");
+    assert(empty.statusCode == 200);
+    assert(empty.file);
+    assert(empty.bodySize() == 0);
+    assert(empty.header.find("Content-Length: 0\r\n") != std::string::npos);
+
+    HttpResponse missingResponse;
+    PreparedResponse missing = missingResponse.prepare("/missing-file.html", false, "webroot");
+    assert(missing.statusCode == 404);
+    assert(!missing.file);
+    assert(!missing.body.empty());
+}
+
+void test_timer_heap_add_update_remove_and_expire() {
+    TimerHeap timers;
+    TimerHeap::TimePoint now = TimerHeap::Clock::now();
+
+    timers.addOrUpdate(1, now + std::chrono::seconds(5));
+    timers.addOrUpdate(2, now + std::chrono::seconds(2));
+    timers.addOrUpdate(1, now + std::chrono::seconds(1));
+    timers.remove(2);
+
+    std::vector<int> first = timers.popExpired(now + std::chrono::seconds(1));
+    assert(first.size() == 1);
+    assert(first[0] == 1);
+    assert(timers.empty());
+
+    timers.addOrUpdate(3, now + std::chrono::seconds(3));
+    std::vector<int> none = timers.popExpired(now + std::chrono::seconds(2));
+    assert(none.empty());
+    std::vector<int> second = timers.popExpired(now + std::chrono::seconds(3));
+    assert(second.size() == 1);
+    assert(second[0] == 3);
+}
+
+void test_async_singleton_logger_flushes_lines() {
+    const std::string path = "test_access.log";
+    std::remove(path.c_str());
+
+    Logger& first = Logger::instance();
+    Logger& second = Logger::instance();
+    assert(&first == &second);
+
+    first.init(path);
+    first.info("timer ready");
+    first.access("127.0.0.1", "GET", "/", 200, 128);
+    first.shutdown();
+
+    std::ifstream in(path.c_str());
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    std::string content = buffer.str();
+    assert(content.find("INFO timer ready") != std::string::npos);
+    assert(content.find("ACCESS 127.0.0.1 GET / 200 128") != std::string::npos);
+}
+
 } // namespace
 
 int main() {
@@ -124,6 +197,9 @@ int main() {
     test_connection_extracts_pipelined_requests();
     test_connection_waits_for_complete_body();
     test_response_builds_200_404_403_and_empty_file();
+    test_response_prepares_mapped_static_files();
+    test_timer_heap_add_update_remove_and_expire();
+    test_async_singleton_logger_flushes_lines();
 
     std::cout << "All unit tests passed." << std::endl;
     return 0;

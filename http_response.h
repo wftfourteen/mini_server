@@ -12,7 +12,35 @@
 #ifndef HTTP_RESPONSE_H
 #define HTTP_RESPONSE_H
 
+#include <memory>
 #include <string>
+
+class MappedFile {
+public:
+    MappedFile();
+    ~MappedFile();
+
+    MappedFile(const MappedFile&) = delete;
+    MappedFile& operator=(const MappedFile&) = delete;
+
+    bool open(const std::string& filepath);
+    const char* data() const { return data_; }
+    std::size_t size() const { return size_; }
+    bool valid() const { return data_ != nullptr || size_ == 0; }
+
+private:
+    char* data_;
+    std::size_t size_;
+};
+
+struct PreparedResponse {
+    int statusCode;
+    std::string header;
+    std::string body;
+    std::shared_ptr<MappedFile> file;
+
+    std::size_t bodySize() const;
+};
 
 class HttpResponse {
 public:
@@ -26,6 +54,14 @@ public:
      * @return             完整的 HTTP 响应报文（头部 + body）
      */
     std::string build(const std::string& path, bool isKeepAlive, const std::string& htmlRoot);
+    PreparedResponse prepare(const std::string& path,
+                             bool isKeepAlive,
+                             const std::string& htmlRoot);
+    static std::string buildText(int statusCode,
+                                 const std::string& body,
+                                 bool isKeepAlive,
+                                 const std::string& contentType);
+    static int statusCodeFromResponse(const std::string& response);
 
 private:
     // 根据文件扩展名获取 MIME 类型
@@ -36,6 +72,10 @@ private:
 
     // 读取文件内容
     static bool readFileContent(const std::string& filepath, std::string& content);
+    static std::string buildHeader(int statusCode,
+                                   const std::string& contentType,
+                                   std::size_t contentLength,
+                                   bool isKeepAlive);
 
     // ---- 响应组件 ----
     int    statusCode_;

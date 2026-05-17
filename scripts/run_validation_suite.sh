@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -u
+set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
@@ -9,14 +9,7 @@ export MINI_DB_USER="${MINI_DB_USER:-mini_user}"
 export MINI_DB_PASSWORD="${MINI_DB_PASSWORD:-mini_password}"
 export MINI_DB_NAME="${MINI_DB_NAME:-mini_server}"
 
-./server >/tmp/mini_server.log 2>&1 &
-server_pid=$!
-
-cleanup() {
-    kill "$server_pid" 2>/dev/null || true
-    wait "$server_pid" 2>/dev/null || true
-}
-trap cleanup EXIT
-
-sleep 1
-python3 scripts/stress_test.py "$@"
+make test
+make smoke-auth
+python3 scripts/smoke_timeout.py
+bash scripts/run_stress_local.sh --host 127.0.0.1 --port 8080 --clients 64 --duration 5 --keepalive 4 --report reports/stress_64c.json

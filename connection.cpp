@@ -1,4 +1,5 @@
 #include "connection.h"
+#include "http_response.h"
 
 #include <algorithm>
 #include <cctype>
@@ -15,15 +16,20 @@ std::string to_lower(std::string value) {
 
 } // namespace
 
-Connection::Connection(int fd)
+Connection::Connection(int fd, const std::string& peerIp)
     : fd_(fd)
+    , peerIp_(peerIp)
+    , writeOffset_(0)
+    , fileOffset_(0)
     , writeReady_(false)
     , closeAfterWrite_(false)
     , processing_(false)
-    , closed_(false) {}
+    , closed_(false)
+    , lastActive_(std::chrono::steady_clock::now()) {}
 
 void Connection::appendReadData(const char* data, std::size_t size) {
     readBuf_.append(data, size);
+    touch();
 }
 
 std::size_t Connection::parseContentLength(const std::string& headersText) {
@@ -69,10 +75,52 @@ bool Connection::extractOneRequest(std::string& rawRequest) {
 }
 
 void Connection::appendWriteData(const std::string& data) {
-    writeBuf_.append(data);
+    writeBuf_ = data;
+    writeOffset_ = 0;
+    fileOffset_ = 0;
+    mappedFile_.reset();
     writeReady_ = !writeBuf_.empty();
+    touch();
+}
+
+void Connection::setMappedWriteData(const std::string& header,
+                                    const std::shared_ptr<MappedFile>& file) {
+    writeBuf_ = header;
+    writeOffset_ = 0;
+    fileOffset_ = 0;
+    mappedFile_ = file;
+    writeReady_ = hasWriteData();
+    touch();
 }
 
 bool Connection::hasWriteData() const {
-    return !writeBuf_.empty();
+    return writeOffset_ < writeBuf_.size() ||
+           (mappedFile_ && fileOffset_ < mappedFile_->size());
+}
+
+void Connection::consumeWriteData(std::size_t bytes) {
+    std::size_t headerRemaining = writeBuf_.size() - writeOffset_;
+    std::size_t headerConsumed = std::min(bytes, headerRemaining);
+    writeOffset_ += headerConsumed;
+    bytes -= headerConsumed;
+
+    if (bytes > 0 && mappedFile_) {
+        std::size_t fileRemaining = mappedFile_->size() - fileOffset_;
+        fileOffset_ += std::min(bytes, fileRemaining);
+    }
+}
+
+void Connection::clearWriteData() {
+    writeBuf_.clear();
+    mappedFile_.reset();
+    writeOffset_ = 0;
+    fileOffset_ = 0;
+}
+
+void Connection::touch() {
+    lastActive_ = std::chrono::steady_clock::now();
+}
+
+bool Connection::idleForAtLeast(std::chrono::seconds timeout) const {
+    return std::chrono::steady_clock::now() - lastActive_ >= timeout;
 }

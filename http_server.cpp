@@ -12,20 +12,30 @@
 #include <netinet/in.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/uio.h>
 #include <unistd.h>
 
 HttpServer::HttpServer(const HttpServerConfig& config)
     : config_(config)
     , listenFd_(-1)
     , running_(false)
-    , workers_(static_cast<std::size_t>(config.workerThreads)) {}
+    , workers_(static_cast<std::size_t>(config.workerThreads))
+    , logger_(Logger::instance())
+    , databasePool_(config.database)
+    , userService_(databasePool_)
+    , router_(userService_) {}
 
 HttpServer::~HttpServer() {
     stop();
 }
 
 bool HttpServer::start() {
-    if (!epoller_.valid() || !initListenSocket()) {
+    mkdir("logs", 0755);
+    mkdir("data", 0755);
+    logger_.init(config_.accessLogPath);
+
+    if (!databasePool_.init() || !epoller_.valid() || !initListenSocket()) {
         return false;
     }
 
@@ -41,6 +51,7 @@ bool HttpServer::start() {
     std::cout << "  port: " << config_.port << std::endl;
     std::cout << "  static root: " << config_.htmlRoot << std::endl;
     std::cout << "  worker threads: " << config_.workerThreads << std::endl;
+    std::cout << "  idle timeout: " << config_.idleTimeoutSeconds << "s" << std::endl;
     std::cout << "========================================" << std::endl;
 
     eventLoop();
@@ -54,6 +65,7 @@ void HttpServer::stop() {
 
     running_ = false;
     workers_.stop();
+    logger_.shutdown();
 
     {
         std::lock_guard<std::mutex> lock(connectionsMutex_);
@@ -114,7 +126,7 @@ void HttpServer::eventLoop() {
     std::vector<epoll_event> events(static_cast<std::size_t>(config_.maxEvents));
 
     while (running_) {
-        int nfds = epoller_.wait(events, -1);
+        int nfds = epoller_.wait(events, 1000);
         if (nfds == -1) {
             if (errno == EINTR) continue;
             std::cerr << "[error] epoll_wait failed: " << strerror(errno) << std::endl;
@@ -130,10 +142,12 @@ void HttpServer::eventLoop() {
             } else if (ev & (EPOLLHUP | EPOLLERR)) {
                 closeConnection(fd);
             } else {
-                if (ev & EPOLLIN) handleRead(fd);
-                if (ev & EPOLLOUT) handleWrite(fd);
+                if (ev & EPOLLIN) dispatchRead(fd);
+                else if (ev & EPOLLOUT) dispatchWrite(fd);
             }
         }
+
+        closeIdleConnections();
     }
 }
 
@@ -154,15 +168,36 @@ void HttpServer::handleAccept() {
 
         {
             std::lock_guard<std::mutex> lock(connectionsMutex_);
-            connections_[connFd] = std::make_shared<Connection>(connFd);
+            connections_[connFd] = std::make_shared<Connection>(connFd, inet_ntoa(clientAddr.sin_addr));
+            timers_.addOrUpdate(
+                connFd,
+                TimerHeap::Clock::now() + std::chrono::seconds(config_.idleTimeoutSeconds));
         }
 
         std::cout << "[accept] " << inet_ntoa(clientAddr.sin_addr)
                   << ":" << ntohs(clientAddr.sin_port)
                   << " fd=" << connFd << std::endl;
 
-        epoller_.add(connFd, EPOLLIN | EPOLLET);
+        epoller_.add(connFd, EPOLLIN | EPOLLET | EPOLLONESHOT);
     }
+}
+
+void HttpServer::dispatchRead(int fd) {
+    auto conn = getConnection(fd);
+    if (!conn || !beginProcessing(conn)) return;
+
+    workers_.enqueue([this, fd] {
+        handleRead(fd);
+    });
+}
+
+void HttpServer::dispatchWrite(int fd) {
+    auto conn = getConnection(fd);
+    if (!conn || !beginProcessing(conn)) return;
+
+    workers_.enqueue([this, fd] {
+        handleWrite(fd);
+    });
 }
 
 void HttpServer::handleRead(int fd) {
@@ -188,7 +223,14 @@ void HttpServer::handleRead(int fd) {
         }
     }
 
-    scheduleIfIdle(conn);
+    {
+        std::lock_guard<std::mutex> lock(connectionsMutex_);
+        timers_.addOrUpdate(
+            fd,
+            TimerHeap::Clock::now() + std::chrono::seconds(config_.idleTimeoutSeconds));
+    }
+
+    processConnectionTask(fd);
 }
 
 void HttpServer::handleWrite(int fd) {
@@ -196,23 +238,39 @@ void HttpServer::handleWrite(int fd) {
     if (!conn) return;
 
     while (true) {
-        std::string chunk;
+        struct iovec iov[2];
+        int iovCount = 0;
         {
             std::lock_guard<std::mutex> lock(conn->mutex());
             if (conn->closed() || !conn->hasWriteData()) {
                 break;
             }
-            chunk.assign(conn->writeBuffer().data(), conn->writeBuffer().size());
+
+            if (conn->writeOffset() < conn->writeBuffer().size()) {
+                iov[iovCount].iov_base = const_cast<char*>(
+                    conn->writeBuffer().data() + conn->writeOffset());
+                iov[iovCount].iov_len = conn->writeBuffer().size() - conn->writeOffset();
+                ++iovCount;
+            }
+
+            if (conn->mappedFile() && conn->fileOffset() < conn->mappedFile()->size()) {
+                iov[iovCount].iov_base = const_cast<char*>(
+                    conn->mappedFile()->data() + conn->fileOffset());
+                iov[iovCount].iov_len = conn->mappedFile()->size() - conn->fileOffset();
+                ++iovCount;
+            }
         }
 
-        ssize_t n = write(fd, chunk.data(), chunk.size());
+        ssize_t n = writev(fd, iov, iovCount);
         if (n > 0) {
             std::lock_guard<std::mutex> lock(conn->mutex());
-            conn->writeBuffer().erase(0, static_cast<std::size_t>(n));
+            conn->consumeWriteData(static_cast<std::size_t>(n));
             continue;
         }
 
         if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            finishProcessing(conn);
+            epoller_.mod(fd, EPOLLOUT | EPOLLET | EPOLLONESHOT);
             return;
         }
 
@@ -225,6 +283,7 @@ void HttpServer::handleWrite(int fd) {
     bool hasPendingRead = false;
     {
         std::lock_guard<std::mutex> lock(conn->mutex());
+        conn->clearWriteData();
         conn->setWriteReady(false);
         closeAfterWrite = conn->closeAfterWrite();
         hasPendingRead = conn->hasPendingRead();
@@ -235,10 +294,19 @@ void HttpServer::handleWrite(int fd) {
         return;
     }
 
-    epoller_.mod(fd, EPOLLIN | EPOLLET);
-    if (hasPendingRead) {
-        scheduleIfIdle(conn);
+    {
+        std::lock_guard<std::mutex> lock(connectionsMutex_);
+        timers_.addOrUpdate(
+            fd,
+            TimerHeap::Clock::now() + std::chrono::seconds(config_.idleTimeoutSeconds));
     }
+    if (hasPendingRead) {
+        processConnectionTask(fd);
+        return;
+    }
+
+    finishProcessing(conn);
+    epoller_.mod(fd, EPOLLIN | EPOLLET | EPOLLONESHOT);
 }
 
 void HttpServer::processConnectionTask(int fd) {
@@ -251,6 +319,7 @@ void HttpServer::processConnectionTask(int fd) {
             std::lock_guard<std::mutex> lock(conn->mutex());
             if (conn->closed() || !conn->extractOneRequest(rawRequest)) {
                 conn->setProcessing(false);
+                epoller_.mod(fd, EPOLLIN | EPOLLET | EPOLLONESHOT);
                 return;
             }
         }
@@ -260,6 +329,10 @@ void HttpServer::processConnectionTask(int fd) {
 
         std::string responseText;
         bool closeAfterWrite = false;
+        std::size_t bytesSent = 0;
+        int statusCode = 0;
+        std::string method = "UNKNOWN";
+        std::string path = "-";
 
         if (!parseOk) {
             responseText =
@@ -270,25 +343,68 @@ void HttpServer::processConnectionTask(int fd) {
                 "\r\n"
                 "Bad Request";
             closeAfterWrite = true;
+            statusCode = 400;
+            bytesSent = responseText.size();
+            {
+                std::lock_guard<std::mutex> lock(conn->mutex());
+                if (conn->closed()) return;
+                conn->appendWriteData(responseText);
+                conn->setCloseAfterWrite(closeAfterWrite);
+            }
         } else {
             bool keepAlive = request.isKeepAlive();
-            HttpResponse response;
-            responseText = response.build(request.getPath(), keepAlive, config_.htmlRoot);
             closeAfterWrite = !keepAlive;
+            method = request.getMethodName();
+            path = request.getPath();
+            if (router_.handles(request)) {
+                RoutedResponse routed = router_.route(request);
+                statusCode = routed.statusCode;
+                responseText = HttpResponse::buildText(
+                    routed.statusCode, routed.body, keepAlive, routed.contentType);
+                bytesSent = responseText.size();
+                {
+                    std::lock_guard<std::mutex> lock(conn->mutex());
+                    if (conn->closed()) return;
+                    conn->appendWriteData(responseText);
+                    conn->setCloseAfterWrite(closeAfterWrite);
+                }
+            } else {
+                HttpResponse response;
+                PreparedResponse prepared =
+                    response.prepare(request.getPath(), keepAlive, config_.htmlRoot);
+                statusCode = prepared.statusCode;
+                responseText = prepared.header;
+                bytesSent = prepared.header.size() + prepared.bodySize();
+                {
+                    std::lock_guard<std::mutex> lock(conn->mutex());
+                    if (conn->closed()) return;
+                    if (prepared.file) {
+                        conn->setMappedWriteData(prepared.header, prepared.file);
+                    } else {
+                        conn->appendWriteData(prepared.header + prepared.body);
+                    }
+                    conn->setCloseAfterWrite(closeAfterWrite);
+                }
+            }
         }
 
-        {
-            std::lock_guard<std::mutex> lock(conn->mutex());
-            if (conn->closed()) return;
-            conn->appendWriteData(responseText);
-            conn->setCloseAfterWrite(closeAfterWrite);
-        }
+        finishProcessing(conn);
+        epoller_.mod(fd, EPOLLOUT | EPOLLET | EPOLLONESHOT);
+        logger_.access(conn->peerIp(), method, path, statusCode, bytesSent);
+        return;
+    }
+}
 
-        epoller_.mod(fd, EPOLLOUT | EPOLLET);
+void HttpServer::closeIdleConnections() {
+    std::vector<int> expired;
+    {
+        std::lock_guard<std::mutex> lock(connectionsMutex_);
+        expired = timers_.popExpired(TimerHeap::Clock::now());
+    }
 
-        if (closeAfterWrite) {
-            return;
-        }
+    for (int fd : expired) {
+        logger_.info("idle timeout fd=" + std::to_string(fd));
+        closeConnection(fd);
     }
 }
 
@@ -302,6 +418,7 @@ void HttpServer::closeConnection(int fd) {
         }
         conn = it->second;
         connections_.erase(it);
+        timers_.remove(fd);
     }
 
     {
@@ -322,20 +439,21 @@ std::shared_ptr<Connection> HttpServer::getConnection(int fd) {
     return it->second;
 }
 
-void HttpServer::scheduleIfIdle(const std::shared_ptr<Connection>& conn) {
-    bool shouldSchedule = false;
+bool HttpServer::beginProcessing(const std::shared_ptr<Connection>& conn) {
     {
         std::lock_guard<std::mutex> lock(conn->mutex());
         if (!conn->closed() && !conn->processing()) {
             conn->setProcessing(true);
-            shouldSchedule = true;
+            return true;
         }
     }
+    return false;
+}
 
-    if (shouldSchedule) {
-        int fd = conn->fd();
-        workers_.enqueue([this, fd] {
-            processConnectionTask(fd);
-        });
+void HttpServer::finishProcessing(const std::shared_ptr<Connection>& conn) {
+    if (!conn) return;
+    std::lock_guard<std::mutex> lock(conn->mutex());
+    if (!conn->closed()) {
+        conn->setProcessing(false);
     }
 }

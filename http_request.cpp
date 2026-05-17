@@ -160,6 +160,16 @@ std::string HttpRequest::getHeader(const std::string& key) const {
     return (it != headers_.end()) ? it->second : "";
 }
 
+std::string HttpRequest::getMethodName() const {
+    switch (method_) {
+        case HttpMethod::GET: return "GET";
+        case HttpMethod::POST: return "POST";
+        case HttpMethod::PUT: return "PUT";
+        case HttpMethod::DELETE: return "DELETE";
+        default: return "UNKNOWN";
+    }
+}
+
 std::string HttpRequest::normalizeHeaderKey(const std::string& key) {
     std::string normalized = key;
     std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char ch) {

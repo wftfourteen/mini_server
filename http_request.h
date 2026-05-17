@@ -45,6 +45,7 @@ public:
     // ========== 获取解析结果 ==========
 
     HttpMethod getMethod() const { return method_; }
+    std::string getMethodName() const;
     const std::string& getPath() const { return path_; }
     const std::string& getVersion() const { return version_; }
     bool isKeepAlive() const { return keepAlive_; }

@@ -7,8 +7,57 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cstdlib>
 #include <unordered_map>
 #include <iostream>
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+MappedFile::MappedFile()
+    : data_(nullptr)
+    , size_(0) {}
+
+MappedFile::~MappedFile() {
+    if (data_) {
+        munmap(data_, size_);
+    }
+}
+
+bool MappedFile::open(const std::string& filepath) {
+    int fd = ::open(filepath.c_str(), O_RDONLY);
+    if (fd == -1) {
+        return false;
+    }
+
+    struct stat info;
+    if (fstat(fd, &info) == -1 || !S_ISREG(info.st_mode)) {
+        close(fd);
+        return false;
+    }
+
+    size_ = static_cast<std::size_t>(info.st_size);
+    if (size_ == 0) {
+        close(fd);
+        return true;
+    }
+
+    void* mapped = mmap(nullptr, size_, PROT_READ, MAP_PRIVATE, fd, 0);
+    close(fd);
+    if (mapped == MAP_FAILED) {
+        data_ = nullptr;
+        size_ = 0;
+        return false;
+    }
+
+    data_ = static_cast<char*>(mapped);
+    return true;
+}
+
+std::size_t PreparedResponse::bodySize() const {
+    return file ? file->size() : body.size();
+}
 
 HttpResponse::HttpResponse()
     : statusCode_(200)
@@ -79,12 +128,15 @@ std::string HttpResponse::getMimeType(const std::string& path) {
 std::string HttpResponse::getStatusLine(int code) {
     static const std::unordered_map<int, std::string> STATUS_MAP = {
         {200, "OK"},
+        {201, "Created"},
         {301, "Moved Permanently"},
         {304, "Not Modified"},
         {400, "Bad Request"},
+        {401, "Unauthorized"},
         {403, "Forbidden"},
         {404, "Not Found"},
         {405, "Method Not Allowed"},
+        {409, "Conflict"},
         {413, "Payload Too Large"},
         {500, "Internal Server Error"},
         {502, "Bad Gateway"},
@@ -192,4 +244,87 @@ std::string HttpResponse::build(const std::string& path,
     response += body_;
 
     return response;
+}
+
+PreparedResponse HttpResponse::prepare(const std::string& path,
+                                       bool isKeepAlive,
+                                       const std::string& htmlRoot) {
+    PreparedResponse prepared;
+    prepared.statusCode = 200;
+
+    std::string contentType = "text/html; charset=utf-8";
+    if (path.find("..") != std::string::npos) {
+        prepared.statusCode = 403;
+        prepared.body =
+            "<html><body><h1>403 Forbidden</h1><p>Access denied.</p></body></html>";
+    } else {
+        std::string filepath;
+        if (path == "/" || path.empty()) {
+            filepath = htmlRoot + "/index.html";
+        } else {
+            filepath = htmlRoot + path;
+        }
+
+        std::shared_ptr<MappedFile> file(new MappedFile());
+        if (file->open(filepath)) {
+            prepared.file = file;
+            contentType = getMimeType(filepath);
+        } else if (path == "/" || path.empty()) {
+            prepared.body =
+                "<html><body>"
+                "<h1>Welcome to MiniServer!</h1>"
+                "<p>Static file server is running.</p>"
+                "<p>Put your files in the <b>webroot/</b> directory.</p>"
+                "</body></html>";
+        } else {
+            prepared.statusCode = 404;
+            prepared.body =
+                "<html><body>"
+                "<h1>404 Not Found</h1>"
+                "<p>The requested URL was not found on this server.</p>"
+                "</body></html>";
+        }
+    }
+
+    prepared.header =
+        buildHeader(prepared.statusCode, contentType, prepared.bodySize(), isKeepAlive);
+    return prepared;
+}
+
+std::string HttpResponse::buildText(int statusCode,
+                                    const std::string& body,
+                                    bool isKeepAlive,
+                                    const std::string& contentType) {
+    std::string response;
+    response += getStatusLine(statusCode);
+    response += "Server: MiniServer/1.0\r\n";
+    response += "Content-Type: " + contentType + "\r\n";
+    response += "Content-Length: " + std::to_string(body.size()) + "\r\n";
+    response += "Connection: " + std::string(isKeepAlive ? "keep-alive" : "close") + "\r\n";
+    response += "\r\n";
+    response += body;
+    return response;
+}
+
+std::string HttpResponse::buildHeader(int statusCode,
+                                      const std::string& contentType,
+                                      std::size_t contentLength,
+                                      bool isKeepAlive) {
+    std::string response;
+    response += getStatusLine(statusCode);
+    response += "Server: MiniServer/1.0\r\n";
+    response += "Content-Type: " + contentType + "\r\n";
+    response += "Content-Length: " + std::to_string(contentLength) + "\r\n";
+    response += "Connection: " + std::string(isKeepAlive ? "keep-alive" : "close") + "\r\n";
+    response += "Accept-Ranges: bytes\r\n";
+    response += "\r\n";
+    return response;
+}
+
+int HttpResponse::statusCodeFromResponse(const std::string& response) {
+    std::size_t firstSpace = response.find(' ');
+    if (firstSpace == std::string::npos || firstSpace + 4 > response.size()) {
+        return 0;
+    }
+    return std::atoi(response.substr(firstSpace + 1, 3).c_str());
 }

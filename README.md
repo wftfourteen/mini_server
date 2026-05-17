@@ -92,6 +92,27 @@ make stress-local
 python3 scripts/stress_test.py --clients 128 --duration 30 --keepalive 8
 ```
 
+生成 JSON 压测报告：
+
+```bash
+python3 scripts/stress_test.py --clients 128 --duration 30 --keepalive 8 \
+  --report reports/stress_128c.json
+```
+
+一键验证：
+
+```bash
+make validate
+```
+
+内存泄漏验证：
+
+```bash
+make valgrind-check
+```
+
+该目标会在 Valgrind 下启动真实服务，覆盖静态资源、注册登录和空闲连接超时路径，并把报告写入 `reports/valgrind.log`。
+
 ---
 
 ## 架构说明
@@ -108,6 +129,82 @@ http_request.*      # HTTP 请求解析
 http_response.*     # 静态文件响应构建
 tests/unit_tests.cpp
 scripts/stress_test.py
+```
+
+## 新增能力
+
+### 访问日志
+
+服务器使用单例异步日志器：业务线程只把日志写入阻塞队列，后台线程批量落盘到 `logs/access.log`，格式如下：
+
+```text
+2026-05-16 10:30:00 ACCESS 127.0.0.1 GET /index.html 200 1024
+```
+
+### 空闲连接超时
+
+默认空闲超时时间是 30 秒。每个连接进入小根堆定时器，读写活跃时刷新过期时间；主循环周期性弹出堆顶过期节点并关闭连接。新增、刷新和删除的核心复杂度为 `O(logN)`，超时关闭会在日志中记录 `idle timeout`。
+
+### 注册与登录
+
+用户数据保存在 MySQL，服务端维护固定大小的数据库连接池。
+
+注册：
+
+```bash
+curl -X POST http://localhost:8080/register \
+  -d "username=alice&password=secret"
+```
+
+登录：
+
+```bash
+curl -X POST http://localhost:8080/login \
+  -d "username=alice&password=secret"
+```
+
+也可以直接跑端到端认证冒烟测试：
+
+```bash
+make smoke-auth
+```
+
+空闲连接踢除测试：
+
+```bash
+make smoke-timeout
+```
+
+当前实现面向学习和演示，密码仍以明文保存；如果要进入生产环境，下一步应改成带盐哈希，并补 session/token、限流和更完整的输入校验。
+
+启动前需要先准备 MySQL：
+
+```bash
+sudo apt update
+sudo apt install -y libmysqlclient-dev
+mysql -uroot -p -e "CREATE DATABASE IF NOT EXISTS mini_server;"
+```
+
+默认连接参数是：
+
+```text
+host=127.0.0.1
+port=3306
+user=root
+password=
+database=mini_server
+```
+
+可以在 `HttpServerConfig::database` 中按本机环境调整。
+
+更推荐用环境变量覆盖，避免把密码写进源码：
+
+```bash
+export MINI_DB_HOST=127.0.0.1
+export MINI_DB_PORT=3306
+export MINI_DB_USER=mini_user
+export MINI_DB_PASSWORD=your_password
+export MINI_DB_NAME=mini_server
 ```
 
 ### 请求处理流程
@@ -190,11 +287,17 @@ scripts/stress_test.py
 
 ## 已实现升级
 
-- [x] 线程池：并发处理多个请求（主线程 IO + 工作线程解析/构建响应）
+- [x] 线程池：主线程只做事件分发，工作线程负责读写、解析和响应构建
+- [x] EPOLLONESHOT：保证同一 fd 同时只被一个工作线程处理
 - [x] Keep-Alive 复用：同一个连接可连续处理多个请求
+- [x] 单例异步日志：阻塞队列 + 后台线程批量落盘
+- [x] 小根堆定时器：按过期时间管理空闲连接
+- [x] MySQL 连接池：RAII Lease 管理连接归还
 
-## 下一步扩展方向
+## 验证清单
 
-- [ ] 日志系统：记录访问日志
-- [ ] 定时器：踢出超时连接
-- [ ] 数据库连接池：支持用户登录注册
+- `make test`：协议解析、连接切包、响应构建、定时器、异步日志
+- `make smoke-auth`：注册、登录、错误密码、重复注册、访问日志
+- `make smoke-timeout`：空闲连接超时关闭
+- `make stress-local`：本地并发静态资源压测
+- `make validate`：一键运行完整验证套件
